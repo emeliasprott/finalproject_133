@@ -1,0 +1,921 @@
+---
+title: "Final Project: Cholangitis Analysis"
+author: "Emelia Sprott"
+format:
+    html:
+        theme: lux
+        highlight: arrow
+        mainfont: font_google('Dosis')
+        fontcolor: black
+        fontsize: 12pt
+        monofont: font_google("Xanh Mono")
+        code-overflow: wrap
+---
+
+
+### Introduction
+
+Primary biliary cholangitis (PBC) is a chronic disease that gradually destroys the bile ducts connecting the liver and intestines. Though the exact cause is uncertain, PBC occurs when the body’s immune system mistakenly attacks itself. When bile ducts are damaged, bile builds up in the liver causing progressively worsening scarring and inflammation. Eventually the scarring causes liver cirrhosis, and the liver is unable to function effectively. There is currently no cure for the disease, but some treatments can help manage symptoms and slow the progression of the disease. PBC primarily affects women and arises in individuals between the ages of 30 and 60 years old. The disease is most prevalent in northern Europe and North America, and a family history of PBC also increases the risk of developing it. In people predisposed to the disease, environmental factors including exposure to chemicals, smoking, and infections may trigger or aggravate the disease. The proportion of individuals with PBC ranges from 1.91 to 40.2 per 100,000 people, and the rate of its diagnosis ranges from 0.33 to 5.8 per 100,000 people per year.
+
+Survival analysis is a statistical method used to analyze and predict the time until a specific event occurs, emphasizing the duration until the event of interest occurs. Widely applied in medical and health research, survival analysis is helpful for studies where the timing of an event is the focus. Another unique aspect of survival analysis is it allows for multiple different events to serve simultaneously as the event of interest. Anytime analysis is focused on the time to an event, survival analysis may be appropriate. Its most obvious application is in clinical trials, studying the length of time a patient survives with a certain medication. It could also be used to model the time it takes to find a new job after being fired, life expectancy with a particular disease, shipping and transportation time, or the lifespan of a product. Survival analysis with the cholangitis dataset will produce a model of the life expectancy of individuals with PBC, taking into account many different factors which might contribute to their health outcome.
+
+#### Data and Packages for Reproducibility
+
+```{r setup, results = "hide", message = FALSE, warning = FALSE}
+library(tidyverse)
+library(lubridate)
+library(broom)
+library(GGally)
+library(ggalluvial)
+library(patchwork)
+library(ggbeeswarm)
+library(RColorBrewer)
+library(leaps)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+#| message: FALSE
+#| warning: FALSEf
+```
+
+```{r}
+## Load data
+cholangitis_data <- read.csv("cholangitis.csv")
+```
+
+```{r}
+## Convert ordinal categorical variables to factors
+cholangitis_df <- cholangitis_data %>%
+    mutate(drug = ifelse(is.na(drug), "None", drug)) %>%
+    mutate(
+        status = as.factor(status),
+        drug = factor(drug, levels = c("Placebo", "D-penicillamine", "None")),
+        ascites = as.factor(ascites),
+        hepatomegaly = as.factor(hepatomegaly),
+        spiders = as.factor(spiders),
+        edema = as.factor(edema),
+        stage = factor(stage, levels = rev(1L:4L))
+    )
+```
+
+```{r, results = "hide"}
+## filter NA values other than drug
+cholangitis_NA <- cholangitis_df %>%
+    filter_all(any_vars(is.na(.)))
+
+cholangitis <- cholangitis_df %>%
+    anti_join(cholangitis_NA, by = "id") %>%
+    select(-id)
+
+## table of numeric variables
+cholangitis_numeric <- cholangitis %>%
+    select_if(is.numeric)
+```
+
+## Data Structure
+
+```{r}
+## check for outliers in response variable
+cholangitis %>%
+    ggplot(aes(x = n_days)) +
+    geom_boxplot(fill = "cadetblue", color = "chocolate4", linewidth = 1.5) +
+    labs(title = "Distribution of n_days") +
+    theme_classic() +
+    theme(plot.title = element_text(size = 18, hjust = 0.5, color = "black"))
+```
+
+I found no obvious outliers in the response variable, n_days, and its distribution is slightly right-skewed.
+
+```{r}
+## outliers and distributions of numeric variables
+cholangitis_numeric %>%
+    select(-n_days) %>%
+    gather(key = "variable", value = "value") %>%
+    ggplot(aes(x = value, y = variable, fill = variable, color = variable)) +
+    geom_boxplot() +
+    scale_fill_brewer(palette = "BrBG") +
+    scale_color_manual(values = c(rep("dodgerblue3", 3), rep("black", 5), rep("dodgerblue3", 3))) +
+    facet_wrap(~variable, scales = "free") +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 30))
+```
+
+Age, albumin, and platelets are all roughly symmetrical, with few outliers. The other numeric explanatory variables are all right-skewed, with many outliers.
+
+I will construct the same plot again, this time grouping by drug type.
+
+```{r}
+cholangitis %>%
+    select(-n_days) %>%
+    select(drug, where(is.numeric)) %>%
+    gather(key = "variable", value = "value", -drug) %>%
+    ggplot(aes(x = value, fill = variable, color = drug)) +
+    geom_boxplot(linewidth = 1) +
+    scale_fill_manual(values = colorRampPalette(brewer.pal(9, "RdPu"))(10)) +
+    scale_color_manual(values = c("darkorange1", "royalblue1", "darkgreen")) +
+    facet_wrap(~variable, scales = "free", ncol = 3) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+    guides(fill = "none")
+```
+
+The boxplots for each numerical variable between drug type are all roughly the same shapes, but there are some observable difference between the groups. The placebo group shows more outliers at the high end of the distribution for bilirubin and cholesterol. The drug group shows a slightly lower IQR for prothrombin and copper, and a higher IQR for albumin and cholesterol.
+
+```{r}
+## same plot, by status
+cholangitis %>%
+    select(-n_days) %>%
+    select(status, where(is.numeric)) %>%
+    gather(key = "variable", value = "value", -status) %>%
+    ggplot(aes(x = value, y = status, fill = variable, color = status)) +
+    geom_boxplot(linewidth = 1) +
+    scale_fill_brewer(palette = "PiYG") +
+    scale_color_manual(values = c("orangered", "mediumspringgreen", "midnightblue")) +
+    scale_y_discrete(labels = list("D" = "Died", "CL" = "Transplant", "C" = "Alive")) +
+    facet_wrap(~variable, scales = "free", ncol = 3) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+    guides(fill = "none", color = "none")
+```
+
+Using the same plot, but this time grouping by status, the boxplot distributions show much more variance among levels than with the drug grouping. The most notable differences in distributions are seen in age, albumin, bilirubin, copper, prothrombin, and sgot.
+
+```{r}
+cholangitis %>%
+    select(stage, where(is.numeric)) %>%
+    gather(key = "variable", value = "value", -stage,-n_days) %>%
+    ggplot(aes(x = value, y= n_days, color = stage)) +
+    geom_smooth(formula = "y~x", method = "loess", se = FALSE) +
+    scale_color_manual(values = c("orangered", "mediumspringgreen", "midnightblue", "goldenrod")) +
+    facet_wrap(~variable, scales = "free", ncol = 3) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+    guides(fill = "none")
+```
+
+One final comparison of the relationship between n_days and the numerical variables, by stage. Notably, Stage 1 exhibits a distinct distribution from the other stages in many of the variables.
+
+
+The way the study was conducted implies an inherent relationship between n_days and status, so I would like to examine their relationship first.
+
+```{r}
+## n_days and status
+cholangitis %>%
+    ggplot(aes(x = status, y = n_days)) +
+    geom_beeswarm(aes(fill = status), color = "black", size = 2, cex = 1.2, shape = 21) +
+    scale_fill_manual(values = c("darkolivegreen2", "deepskyblue", "darkseagreen1")) +
+    labs(title = "Distribution of n_days by status") +
+    theme_classic() +
+    theme(plot.title = element_text(size = 18, hjust = 0.5))
+```
+
+There is an observable pattern in the relationship between n_days and status level. Patients with a status of "Not Dead" tend to have higher values of n_days than patients with a status of "Dead". There are also very few observations with a status of "received liver transplant".
+
+```{r}
+## n_days, status, and stage
+cholangitis %>%
+    ggplot(aes(x = status, fill = stage)) +
+    geom_bar(color = "black", position = "fill") +
+    scale_fill_manual(values = c("darkolivegreen2", "deepskyblue", "darkmagenta", "lightyellow2")) +
+    labs(title = "Distribution of Stage by Status") +
+    theme_classic() +
+    theme(plot.title = element_text(size = 18, hjust = 0.5))
+```
+
+The standardized proportions of the stages of patients by their status at the end of the study shows that the proportion of patients at stage 4 increases as status declines. For example, of the patients who died, more than half were stage 4.
+
+```{r}
+## response variable and drug type
+cholangitis %>%
+    ggplot(aes(x = n_days, color = drug)) +
+    geom_density(linewidth = 1.5, kernel = "rectangular") +
+    scale_color_manual(values = c("darkorange1", "royalblue1", "darkgreen")) +
+    theme_classic() +
+    labs(title = "Running Window Density of N_Days",
+    subtitle = "By Drug Group")
+```
+
+The density curves for n_days show similar shapes, although the patients who received no drug show the earliest peak and the drug group shows the latest peak.
+
+
+The relationship between n_days and drug type is not as clear as the relationship between n_days and status. The density curves for n_days show very similar shapes. In the context of the study, I am most interested in understanding the relationships of drug and status with n_days before I fit the model. The way n_days is determined is inherently related to the patient's status at n_days, as the patient's time in the study concludes as soon as one of the status levels occurs. This would make sense in the context of the study. Patients in the drug group might exhibit less variation in status level. I would like to examine the interaction between status and drug, and their combined relationship with n_days.
+
+```{r}
+cholangitis %>%
+    ggplot(aes(x = n_days, color = (status:drug))) +
+    geom_density(alpha = 1, linewidth = 1.5) +
+    scale_color_brewer(palette = "Set3") +
+    labs(title = "Distribution of n_days, by status and drug type", color = "Status and Drug") +
+    theme_classic()
+```
+
+The density curves for each status type and drug type show slightly different shapes. Among the patients who died, the drug group tend to have higher n_days. The patients who received a liver transplant also show varying distributions between drug groups, although because there are few observations in the category this may be coincidental.
+
+```{r}
+as.data.frame(cor(cholangitis_numeric)) %>%
+    rownames_to_column("Variables_1") %>%
+    pivot_longer(-c(Variables_1), names_to = "Variables_2", values_to = "Correlation") %>%
+    arrange(Correlation) %>%
+    mutate(
+        Variables_1 = factor(Variables_1, levels = unique(Variables_1)),
+        Variables_2 = factor(Variables_2, levels = unique(Variables_2))
+    ) %>%
+    ggplot(mapping = aes(x = Variables_1, y = Variables_2)) +
+    geom_tile(aes(fill = Correlation)) +
+    scale_fill_gradient(low = "lightcyan", high = "blue2") +
+    scale_x_discrete(guide = guide_axis(n.dodge = 2))
+```
+
+N_days has the highest level of correlation with platelets and alk_phos. It also shows a high negative correlation with albumin, bilirubin, sgot, and copper.
+
+```{r, message = FALSE, warning = FALSE}
+## pairs plot of numerical variables
+cholangitis_numeric %>%
+    ggpairs()
+```
+
+Of all the numerical variables, alburnin, copper, and alk_phos exhibit correlations of the highest magnitude. I noticed in the pairs plot n_days plotted against each of these variables creates a curved shape in the graph, which means some of these variables may need to be log transformed in the model.
+
+
+```{r, warning = FALSE, message = FALSE}
+## other categorical variables
+cholangitis %>%
+    select(n_days, sex, ascites, hepatomegaly, spiders, edema, stage) %>%
+    gather(key = "category", value = "value", -n_days) %>%
+    ggplot(aes(x = n_days, color = value)) +
+    geom_density(aes(group = interaction(category, value))) +
+    facet_wrap(~category, scales = "free")
+```
+
+I have already examined the relationships between drug and status with n_days, but the other categorical variables exhibit a relationship as well. The variables for edema, stage, sex, ascites, and hepatomegaly exhibit very different distributions of n_days among levels.
+
+```{r}
+## encoding to convert categorical variables to numerical values, for EDA purposes only
+subbed_categorical <- cholangitis %>%
+    mutate(
+        ascitesY = ifelse(ascites == "Y", 1, 0),
+        ascitesN = ifelse(ascites == "N", 1, 0),
+        statusCL = ifelse(status == "CL", 1, 0),
+        statusD = ifelse(status == "D", 1, 0),
+        statusC = ifelse(status == "C", 1, 0),
+        stage4 = ifelse(stage == 4L, 1, 0),
+        stage3 = ifelse(stage == 3L, 1, 0),
+        stage2 = ifelse(stage == 2L, 1, 0),
+        stage1 = ifelse(stage == 1L, 1, 0),
+        edemaS = ifelse(edema == "S", 1, 0),
+        edemaY = ifelse(edema == "Y", 1, 0),
+        edemaN = ifelse(edema == "N", 1, 0),
+        sexM = ifelse(sex == "M", 1, 0),
+        sexF = ifelse(sex == "F", 1, 0),
+        drugPlacebo = ifelse(drug == "Placebo", 1, 0),
+        drugD_penicillamine = ifelse(drug == "D-penicillamine", 1, 0),
+        drugNone = ifelse(drug == "None", 1, 0),
+        hepatomegalyY = ifelse(hepatomegaly == "Y", 1, 0),
+        hepatomegalyN = ifelse(hepatomegaly == "N", 1, 0),
+        spidersY = ifelse(spiders == "Y", 1, 0),
+        spidersN = ifelse(spiders == "N", 1, 0)
+    ) %>%
+    select(-c(ascites, status, stage, edema, sex, drug, hepatomegaly, spiders))
+
+as.data.frame(cor(subbed_categorical)) %>%
+    rownames_to_column("Variables_1") %>%
+    pivot_longer(-c(Variables_1), names_to = "Variables_2", values_to = "Correlation") %>%
+    ## examine magnitude, not direction of relationships
+    mutate(cor = abs(Correlation)) %>%
+    mutate(
+        Variables_1 = factor(Variables_1, levels = unique(Variables_1)),
+        Variables_2 = factor(Variables_2, levels = unique(Variables_2))
+    ) %>%
+    arrange(desc(cor)) %>%
+    ## ignore variable-self correlation
+    mutate(cor = ifelse(Variables_1 == Variables_2 | str_extract(Variables_1, "^[a-z(_)?]+(?=[A-Z\\d]?)") == str_extract(Variables_2, "^[a-z(_)?]+(?=[A-Z\\d]?)"), NA, cor)) %>%
+    ggplot(mapping = aes(x = Variables_1, y = Variables_2)) +
+    geom_tile(aes(fill = cor)) +
+    scale_fill_gradient(low = "skyblue2", high = "tomato3", na.value = "tan") +
+    labs(fill = "Correlation Magnitude") +
+    scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
+    theme(axis.text.x = element_text(size = 7, angle = 15, color = "black"))
+```
+
+To examine the correlations between all variables, both categorical and numerical, I used one-hot encoding and treated the encoded categorical variables as numeric. I also included terms for all levels of the categorical variables, again just for simplying visualisation. As the correlation between different levels of the categorical variables is irrelavant for modeling purposes, I removed those values as well. N_days shows the strongest magnitude of correlation with bilirubin, albumin, and statusC and statusD. Ascites of both groups show high correlation with edemaY, and a moderate correlation with edemaN. StatusD and statusC both show a similar correlations with bilirubin and n_days. Interestingly, statusD and statusC exhibit many similar relationships with the other variables, and edemaY and edemaN do as well. Stage4 shows fairly weak correlations with the oterh variables, but stronger relationships than the other stage levels.
+
+
+## Modeling n_days with linear regression
+
+To model n_days using all explanatory variables, I first fit an MLR model without any transformations. I want to understand how the variables interact without any interference within the environment of linear regression before determining how to best fit the model.
+
+```{r}
+# first attempt at model
+model_raw <- lm(n_days ~ ., data = cholangitis)
+summary_model_raw <- summary(model_raw)
+summary_model_raw$adj.r.squared
+
+data.frame(list(
+    "minimum" = min(summary_model_raw$residuals),
+    "q1" = quantile(summary_model_raw$residuals, probs = 0.25),
+    "median" = median(summary_model_raw$residuals),
+    "average" = mean(summary_model_raw$residuals),
+    "q3" = quantile(summary_model_raw$residuals, probs = 0.75),
+    "maximum" = max(summary_model_raw$residuals)
+), row.names = NULL)
+```
+
+The range of the residuals in this first model is relatively symmetrical -- this indicates the model is not consistently over- or under-estimating in a particular direction.
+
+```{r, echo = TRUE}
+residuals_1 <- cholangitis %>%
+    mutate(
+        "residuals" = model_raw$residuals,
+    "fitted.values" = model_raw$fitted.values)
+
+ggplot(residuals_1, aes(x = fitted.values, y = residuals)) +
+    geom_point(size = 3, shape = 21, fill = "darkseagreen2", color = "black") +
+    labs(title = "First Fit Residuals Show Minimal Linearity",
+        x = "Fitted Values",
+        y = "Residuals") +
+    theme_minimal()
+```
+
+The first fit residuals show a slight pattern of increasing variance for middle values of n_days. The distribution has two faint tails, one negative towards the right, and one positive towards the left. None of these patterns are particularly strong, but they do violate the assumptions of a linear model.
+
+```{r}
+# Plotting the first fit residuals, with categorical groupings
+ascites_resid <- ggplot(residuals_1, aes(x = fitted.values, y = residuals)) +
+    geom_point(aes(fill = ascites), color = "black", shape = 21, size = 3)
+status_resid <- ggplot(residuals_1, aes(x = fitted.values, y = residuals)) +
+    geom_point(aes(fill = status), color = "black", shape = 21, size = 3)
+stage_resid <- ggplot(residuals_1, aes(x = fitted.values, y = residuals)) +
+    geom_point(aes(fill = stage), color = "black", shape = 21, size = 3)
+edema_resid <- ggplot(residuals_1, aes(x = fitted.values, y = residuals)) +
+    geom_point(aes(fill = edema), color = "black", shape = 21, size = 3)
+(ascites_resid + status_resid) / (stage_resid + edema_resid)
+```
+
+When the residuals of the first attempted model are plotted against its fitted values, it's clear this model is not appropriate for the data. The residuals show the most variance for middle values of n_days.
+Each of the categorical variable groupings adds a semi-distinguishable pattern to the residuals plot, with the most distinct pattern coming from status.
+
+In my EDA, I noticed:\
+    * age, albumin, bilirubin, copper, prothrombin, and sgot have varying distributions of among status levels\
+    * Ascites == "Y" and edema have a strong positive correlation\
+    * Ascites shows a difference in density distributions of n_days among its groups\
+    * The "Yes" edema group shows a different density distribution of n_days than the other groups\
+    * Stage 1 and Stage 2 shows different density distributions of n_days than Stage 3 and Stage 4.\
+    * N_days shows the strongest magnitude of correlation with bilirubin, albumin, and statusC and statusD\
+    * StatusD and statusC both show a similar correlations with bilirubin and n_days.\
+    * Stage4 shows fairly weak correlations with the other variables, but stronger relationships than the other stage levels.\
+
+Encoding the model will make it easier to add specific interaction terms, as some combinations of categorical variables do not exist in the dataset.
+
+```{r}
+encoded_chol <- cholangitis %>%
+    mutate(
+        ascitesY = ifelse(ascites == "Y", 1, 0),
+        statusCL = ifelse(status == "CL", 1, 0),
+        statusD = ifelse(status == "D", 1, 0),
+        stage4 = ifelse(stage == 4L, 1, 0),
+        stage3 = ifelse(stage == 3L, 1, 0),
+        stage2 = ifelse(stage == 2L, 1, 0),
+        edemaS = ifelse(edema == "S", 1, 0),
+        edemaY = ifelse(edema == "Y", 1, 0),
+        sexM = ifelse(sex == "M", 1, 0),
+        drugNone = ifelse(drug == "None", 1, 0),
+        "drugD_penicillamine" = ifelse(drug == "D-penicillamine", 1, 0),
+        hepatomegalyY = ifelse(hepatomegaly == "Y", 1, 0),
+        spidersY = ifelse(spiders == "Y", 1, 0)) %>%
+    select(-c(ascites, status, stage, edema, sex, drug, hepatomegaly, spiders))
+```
+
+Based on the estimates and p-values in this helper model, I determined the most relevant interaction terms to include.
+
+```{r, results = FALSE}
+summary(lm(log(n_days) ~ .:ascites + .:status + .:stage + .:edema + .:drug + .:hepatomegaly + .:spiders + ., data = cholangitis))
+```
+
+Additionally, log-transforming the response variable should improve residuals' homoskedasticity.
+
+```{r}
+interaction_model <- lm(
+    log(n_days) ~
+        sexM:ascitesY +
+        ascitesY:hepatomegalyY +
+        ascitesY:spidersY +
+        ascitesY:edemaS +
+        ascitesY:edemaY +
+        ascitesY:cholesterol +
+        ascitesY:tryglicerides +
+        ascitesY:prothrombin +
+        statusD:drugNone +
+        statusD:edemaS +
+        statusCL:alk_phos +
+        statusD:alk_phos +
+        statusCL:sgot +
+        statusD:stage2 +
+        drugNone:stage2 +
+        hepatomegalyY:stage2 +
+        bilirubin:stage3 +
+        bilirubin:stage2 +
+        cholesterol:stage3 +
+        tryglicerides:stage3 +
+        platelets:stage2 +
+        sexM:edemaS +
+        sexM:edemaY +
+        edemaY:albumin +
+        edemaS:sgot +
+        edemaS:platelets +
+        drugNone:age +
+        drugD_penicillamine:sexM +
+        drugNone:cholesterol +
+        drugNone:alk_phos +
+        drugNone:tryglicerides +
+        drugNone:platelets +
+        hepatomegalyY:albumin +
+        age:platelets +
+        spidersY:alk_phos +
+        spidersY:platelets +
+        ., data = encoded_chol)
+
+summary(interaction_model)$adj.r.squared
+```
+
+```{r}
+residuals_2 <- encoded_chol %>%
+    mutate(
+        residuals = residuals(interaction_model),
+        fitted_values = fitted.values(interaction_model),
+        cooks_distance = cooks.distance(interaction_model),
+        highlev = ifelse(cooks_distance > 0.05, TRUE, FALSE)
+    )
+
+ggplot(residuals_2, aes(x = fitted_values, y = residuals)) +
+    geom_point(aes(fill = highlev), size = 3, color = "black", shape = 21) +
+    labs(
+        title = "Log Transform of the Response Improves the Model",
+        fill = "High Cook's Distance Value"
+    ) +
+    scale_fill_manual(values = c("TRUE" = "lightgreen", "FALSE" = "mistyrose1")) +
+    theme_minimal() +
+    theme(
+        panel.grid.major = element_line(color = "gray76", linewidth = 0.5),
+        plot.title = element_text(size = 16, hjust = 0.5))
+```
+
+The model was significantly improved with the interaction terms and log transformations, although the linearity and homoskedasticity of the residuals are still not ideal. Some of the observations with a high Cook's distance value are not extreme residuals, so I will examine them to see underlying issues.
+
+```{r}
+# high leverage observations
+highlev_pts <- residuals_2 %>%
+    filter(highlev == TRUE) %>%
+    select(-highlev) %>%
+    mutate(n_days = log(n_days)) %>%
+    arrange(desc(abs(residuals)))
+highlev_pts %>%
+    select(n_days, bilirubin, copper, sgot, cooks_distance) %>%
+    head(n = 6)
+```
+
+Among the high-leverage points, the numerical variables show a wide range of values. To counteract some of the skewedness, I will log transform the most skewed variables.
+
+```{r}
+transformed_chol <- encoded_chol %>%
+    mutate_at(vars(cholesterol, alk_phos, platelets, tryglicerides, sgot), log)
+```
+
+```{r}
+transformed_model <- lm(
+    log(n_days) ~
+        sexM:ascitesY +
+        ascitesY:hepatomegalyY +
+        ascitesY:spidersY +
+        ascitesY:edemaS +
+        ascitesY:edemaY +
+        ascitesY:tryglicerides +
+        ascitesY:prothrombin +
+        statusD:drugNone +
+        statusD:edemaS +
+        statusCL:alk_phos +
+        statusD:stage2 +
+        drugNone:stage2 +
+        hepatomegalyY:stage2 +
+        bilirubin:stage3 +
+        bilirubin:stage2 +
+        platelets:stage2 +
+        sexM:edemaS +
+        sexM:edemaY +
+        edemaY:albumin +
+        edemaS:sgot +
+        edemaS:platelets +
+        drugNone:age +
+        drugD_penicillamine:sexM +
+        drugNone:alk_phos +
+        drugNone:platelets +
+        hepatomegalyY:albumin +
+        age:platelets +
+        spidersY:alk_phos +
+        spidersY:platelets +
+        bilirubin:prothrombin +
+        copper:albumin +
+        ., data = transformed_chol)
+
+summary(transformed_model)$adj.r.squared
+```
+
+```{r}
+data.frame(list("residuals" = residuals(transformed_model), "fitted.values" = fitted.values(transformed_model), "cooks_d" = cooks.distance(transformed_model))) %>%
+    mutate(highlev = ifelse(cooks_d > 4 * mean(cooks_d), TRUE, FALSE)) %>%
+    ggplot(aes(x = fitted.values, y = residuals, fill = highlev)) +
+    geom_point(size = 2, shape = 21, color = "black") +
+    theme_minimal() +
+    labs(title = "Log Transforming Skewed Input Variables Improves Model", fill = "High Leverage") +
+    scale_fill_manual(values = c("honeydew2", "deeppink3")) +
+    theme(plot.title = element_text(size = 16, hjust = 0.5))
+```
+
+With an improved model, the number of high leverage points drops. However, some of these points are not extreme and their inclusion might help the model's homoskedasticity.
+
+
+```{r}
+transformed_chol_lev_pts <- transformed_chol %>%
+    mutate(cooks_distance = cooks.distance(transformed_model), residuals = residuals(transformed_model)) %>%
+    filter(cooks_distance > 4 * mean(cooks_distance)) %>%
+    arrange(desc(residuals))
+
+outlier_points <- transformed_chol_lev_pts %>%
+    filter(bilirubin  == 0.7 |
+         bilirubin == 0.8 |
+         bilirubin == 0.9 |
+         bilirubin == 24.5|
+         n_days == 41 & bilirubin == 5|
+         albumin == 4.4)
+
+outlier_points %>%
+    select(n_days, age, bilirubin, cooks_distance)
+```
+
+Interestingly, all but one of the high-leverage points in the model are statusD. The points consistently show extreme values for bilirubin and copper, so an interaction term for statusD with these variables will be helpful.
+
+```{r}
+transformed_chol_filtered <- transformed_chol %>%
+    anti_join(outlier_points, join_by(n_days, bilirubin))
+```
+
+```{r}
+filtered_model <- lm(
+    log(n_days) ~
+        sexM:ascitesY +
+        ascitesY:hepatomegalyY +
+        ascitesY:spidersY +
+        ascitesY:edemaS +
+        ascitesY:edemaY +
+        ascitesY:tryglicerides +
+        ascitesY:prothrombin +
+        statusD:drugNone +
+        statusD:edemaS +
+        statusCL:alk_phos +
+        statusD:stage2 +
+        drugNone:stage2 +
+        hepatomegalyY:stage2 +
+        bilirubin:stage3 +
+        bilirubin:stage2 +
+        platelets:stage2 +
+        sexM:edemaS +
+        sexM:edemaY +
+        edemaY:albumin +
+        edemaS:sgot +
+        edemaS:platelets +
+        drugNone:age +
+        drugD_penicillamine:sexM +
+        drugNone:alk_phos +
+        drugNone:platelets +
+        hepatomegalyY:albumin +
+        age:platelets +
+        spidersY:alk_phos +
+        spidersY:platelets +
+        bilirubin:prothrombin +
+        copper:albumin +
+        ., data = transformed_chol_filtered)
+summary(filtered_model)$adj.r.squared
+```
+
+
+```{r}
+data.frame(list("residuals" = residuals(filtered_model), "fitted.values" = fitted.values(filtered_model))) %>%
+    ggplot(aes(x = fitted.values, y = residuals)) +
+    geom_point(fill = "turquoise", color = "black", shape = 21, size = 3) +
+    labs(
+        title = "Filtered, Improved Model Shows Best Fit"
+    ) +
+    theme_minimal() +
+    theme(
+        panel.grid.major = element_line(color = "gray76", linewidth = 0.5)
+    ) +
+    theme(plot.title = element_text(size = 17, hjust = 0.5))
+```
+
+The model shows a better fit for the data, with a much higher R-squared value. The model is still not ideal, but it is the best representation of the data using all of the variables. The tails in the middle values are softened by the filtering and the transformation, without eliminating excessive data points.
+
+```{r}
+transformed_chol_filtered %>%
+    mutate(residuals = residuals(filtered_model)) %>%
+    ggplot(aes(sample = residuals)) +
+    stat_qq(color = "blue") +
+    stat_qq_line(color = "blue") +
+    labs(title = "Residuals Violate Assumption of Normality at low n_days") +
+    theme_minimal()
+```
+
+The assumption of normality of the residuals is not met for the lowest values of n_days, but that makes sense as the data has less of those values.
+
+```{r}
+filtered_model %>%
+    tidy() %>%
+    filter(term == "drugD_penicillamine")
+```
+
+In the regression model, the p-value for the drugD_penicillamine variable is low, but not below 0.05. In this model, the null hypothesis that the coefficient for drugD_penicillamine is zero is retained. It cannot be determined from this model is associated with an increase in n_days.
+
+
+## Model Accuracy with Cross Validation
+
+With so many variables, as well as a relatively small dataset, I split the data into a testing and training set using 5-fold cross-validation. Many interactions of variables are not shown frequently in the data, so a minimal number of folds will make sure the testing set is large enough to be modeled.
+
+```{r}
+# create 5 folds in the data set
+set.seed(131)
+
+k <- 5
+fold_vector <- cut(1:nrow(transformed_chol_filtered), breaks = k, labels = FALSE)
+
+random_folds <- sample(
+    x = fold_vector,
+    size = nrow(transformed_chol_filtered),
+    replace = FALSE)
+
+filtered_chol <- transformed_chol_filtered %>%
+    mutate(folds = random_folds)
+```
+
+### Stepwise variable selection
+
+```{r}
+# model on all data to obtain formulas for iteration
+subset_model <- regsubsets(log(n_days) ~
+    sexM:ascitesY +
+    ascitesY:hepatomegalyY +
+    ascitesY:spidersY +
+    ascitesY:edemaS +
+    ascitesY:edemaY +
+    ascitesY:tryglicerides +
+    ascitesY:prothrombin +
+    statusD:drugNone +
+    statusD:edemaS +
+    statusCL:alk_phos +
+    statusD:stage2 +
+    drugNone:stage2 +
+    hepatomegalyY:stage2 +
+    bilirubin:stage3 +
+    bilirubin:stage2 +
+    platelets:stage2 +
+    sexM:edemaS +
+    sexM:edemaY +
+    edemaY:albumin +
+    edemaS:sgot +
+    edemaS:platelets +
+    drugNone:age +
+    drugD_penicillamine:sexM +
+    drugNone:alk_phos +
+    drugNone:platelets +
+    hepatomegalyY:albumin +
+    age:platelets +
+    spidersY:alk_phos +
+    spidersY:platelets +
+    bilirubin:prothrombin +
+    copper:albumin +
+    ., data = transformed_chol_filtered, method = "backward", nvmax = 55)
+
+subset_summary <- summary(subset_model)
+```
+
+```{r}
+# obtain all terms included in model
+coef_mat <- subset_summary$which
+# get formulas from helper model
+formulas <- list()
+for (i in 1:54) {
+    terms <- data.frame(list("variable" = names(coef_mat[i, ]), "included" = coef_mat[i, ]), row.names = NULL)
+    variables <- terms %>%
+        filter(variable != "(Intercept)", included == TRUE) %>%
+        pull(variable)
+    input <- paste(variables, collapse = " + ")
+    formula <- paste0("log(n_days) ~ ", input)
+    formulas[i] <- formula
+}
+```
+
+```{r}
+set.seed(131)
+# function to perform cross validation on one fold with one selected formula
+ONE_CV_FOLD <- function(fold_number, formula, model_number) {
+    chol_train <- filtered_chol %>%
+        filter(folds != fold_number)
+
+    chol_test <- filtered_chol %>%
+        filter(folds == fold_number)
+
+    cv_linear_model <-
+        do.call(
+            what = "lm",
+            args = list(formula = as.formula(formula[[model_number]]), data = quote(chol_train)))
+
+    cv_predictions <- predict(object = cv_linear_model, newdata = chol_test)
+
+    observations <- chol_test %>%
+        select(n_days) %>%
+        pull()
+
+    RMSE <- sqrt(mean((cv_predictions - log(observations))^2))
+
+    return(RMSE)}
+```
+
+```{r, option = list(width = 60)}
+rmses <- list()
+for (i in 1:54) {
+    # iterate through each formula and each fold
+    rmse <- mean(sapply(unique(fold_vector), FUN = ONE_CV_FOLD, model_number = i, formula = formulas))
+    # calculate average RMSE for each formula
+    rmses[i] <- rmse
+}
+
+which.min(rmses)
+rmses[which.min(rmses)]
+```
+
+```{r}
+formula_terms <- str_split(formulas[which.min(rmses)], "\\+")[[1]]
+paste(c(
+    paste(formula_terms[1:4], collapse = " + "),
+    paste(formula_terms[5:8], collapse = " + "),
+    paste(formula_terms[9:12], collapse = " + "),
+    paste(formula_terms[13:16], collapse = " + "),
+    paste(formula_terms[17:20], collapse = " + ")), sep = "\n")
+```
+
+Using stepwise variable selection, the best model is the one that includes 20 variables. It minimizes 5-fold average RMSE with a value of 0.5410946.
+
+### Regression tree
+
+The interaction terms will create an error in the regression tree, so I will use a simplified version of the model while fitting it.
+
+```{r}
+set.seed(456)
+
+k <- 5
+
+cholangitis_tree <- cholangitis %>%
+    mutate_at(vars(cholesterol, alk_phos, platelets, tryglicerides, sgot), log)
+
+fold_vector_tree <-
+    cut(1:nrow(cholangitis_tree), breaks = k, labels = FALSE)
+
+random_folds_tree <- sample(
+    x = fold_vector_tree, size = nrow(cholangitis_tree),
+    replace = FALSE
+)
+
+filtered_cholangitis <- cholangitis_tree %>%
+    mutate(folds = random_folds_tree)
+```
+
+```{r}
+set.seed(131)
+
+avg_rmse <- numeric()
+
+# iterate through different alpha values
+for (alpha in seq(0, 0.08, by = 0.001)) {
+
+    rmse <- numeric()
+
+    for (fold in 1:5) {
+        # training and testing sets for the current fold
+        training_data <- filtered_cholangitis %>%
+            filter(folds != fold) %>%
+            select(-folds)
+        testing_data <- filtered_cholangitis %>%
+            filter(folds == fold) %>%
+            select(-folds)
+
+        # fit a tree to the training set
+        tree_model <- rpart(log(n_days) ~ ., data = training_data, control = list(minsplit = 5), cp = 0)
+
+        # prune to the current alpha level
+        pruned_tree <- prune(tree_model, cp = alpha)
+
+        # use the subtree to predict on test set
+        predictions <- predict(pruned_tree, testing_data)
+
+        # calculate rmse
+        rmse[fold] <- sqrt(mean((log(testing_data$n_days) - predictions)^2))
+    }
+
+    # average rmse for all folds at current alpha level
+    avg_rmse <- c(avg_rmse, mean(rmse))
+}
+
+# alpha level that minimizes average rmse
+optimal_alpha <- seq(0, 0.08, by = 0.001)[which.min(avg_rmse)]
+
+optimal_alpha
+avg_rmse[which.min(avg_rmse)]
+```
+
+Using 5-fold cross validation, the best pruned subtree has an alpha of 0.018 and an average RMSE of 0.7198657.
+
+```{r}
+# examine the tree with all of the data
+large_tree <- rpart(log(n_days) ~., data = cholangitis_tree, cp = optimal_alpha)
+
+rpart.plot(large_tree, type = 4, box.palette = "BnBu")
+```
+
+```{r}
+rpart.rules(large_tree, style = "tall")
+```
+
+The regression tree, at the optimal alpha level, considers status, albumin, cholesterol, bilirubin, and edema. It groups status by "C", and not "C", and groups edema by "N" and not "N". The first split is at status, by "C" and not "C".
+
+### Random Forest
+
+```{r}
+set.seed(131)
+avg_rmse_rf <- numeric()
+
+# define specific values for mtry
+mtry_values <- seq(2, 10, by = 1)
+
+# iterate over different mtry values
+for (mtry in mtry_values) {
+
+    rmse_rf <- c()
+
+    for (fold in 1:5) {
+        training_data <- filtered_cholangitis %>%
+            filter(folds != fold) %>%
+            select(-folds)
+        testing_data <- filtered_cholangitis %>%
+            filter(folds == fold) %>%
+            select(-folds)
+
+        rf_model <- randomForest(log(n_days) ~ ., data = training_data, ntree = 200, mtry = mtry)
+
+        predictions_rf <- predict(object = rf_model, newdata = testing_data)
+
+        rmse_rf[fold] <- sqrt(mean((log(testing_data$n_days) - predictions_rf)^2))
+    }
+
+    avg_rmse_rf <- c(avg_rmse_rf, mean(rmse_rf))
+}
+
+optimal_mtry_rf <- mtry_values[which.min(avg_rmse_rf)]
+optimal_mtry_rf
+avg_rmse_rf[which.min(avg_rmse_rf)]
+```
+
+Using 5-fold cross-validation, the optimal number of variables to consider at each split is 5. This random forest has a cross-validated average RMSE of 0.6171849 when mtry = 5.
+
+```{r}
+# fit forest to all data to examine
+large_rf <- randomForest(log(n_days) ~., data = cholangitis_tree, ntree = 200, mtry = 5, importance = TRUE)
+
+varImpPlot(large_rf, main = "Variable Importance Plot", pch = 21)
+```
+
+## Model comparison
+
+
+| Model | Linear Regression | Regression Tree | Random Forest |
+| ---------- | -------------- | ------------- | -------------  |
+| 5-fold average RMSE | `r rmses[which.min(rmses)]` | `r avg_rmse[which.min(avg_rmse)]` | `r avg_rmse_rf[which.min(avg_rmse_rf)]` |
+
+With a 5-fold cross-validated average RMSE of 0.5410946, the linear regression model is the best of all models created for modeling n_days.
+
+
+## Final Comments
+
+The independence of the observations is not maintained in the dataset and the data is not balanced evenly among categorical variables. The data analysis does not account for this in the data, and does not check for multicollinearity of variables as well. This analysis is not survival analysis, which is able to account for censored values.
+
+Further analysis of the efficacy of D-penicillamine could be done using survival analysis. This would involve creating either a survivor function or a hazard function of the data, then determining whether there is a statistically significant difference in risk or survival between the groups. Using the same analysis method, the data could be used to determine whether the presence of a particular symptom, like ascites, is associated with a higher risk of death.
+
+
+#### References
+
+Clark, T. G., Bradburn, M. J., Love, S. B., & Altman, D. G. (2003). Survival analysis part I: Basic concepts and first analyses. British Journal of Cancer, 89(2), 232–238. https://doi.org/10.1038/sj.bjc.6601118
+
+
+Hepatobiliary & Pancreatic Surgery - Primary Biliary Cirrhosis. (n.d.). Hpbsurgery.ucsf.edu. Retrieved December 3, 2023, from https://hpbsurgery.ucsf.edu/conditions--procedures/primary-biliary-cirrhosis.aspx
+
+
+(n.d.). Primary Biliary Cholangitis [Review of Primary Biliary Cholangitis]. Orphanet. https://www.orpha.net/consor/cgi-bin/OC_Exp.php?Lng=GB&Expert=186#:~:text=Primary%20biliary%20cholangitis%20(PBC)%20incidence,sex%20ratio%20of%209%3A1.
+
+
+Primary Biliary Cirrhosis | Conditions and Treatments | Center for Liver Disease & Transplantation | Columbia University Department of Surgery. (n.d.). Columbiasurgery.org. https://columbiasurgery.org/conditions-and-treatments/primary-biliary-cirrhosis

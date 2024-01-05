@@ -1,0 +1,137 @@
+---
+title: "Final Project"
+format: html
+author: "Emelia Sprott"
+---
+
+```{r setup, results = "hide"}
+    library(tidyverse)
+    library(lubridate)
+    library(broom)
+    library(GGally)
+    library(ggalluvial)
+    library(patchwork)
+    library(ggbeeswarm)
+```
+
+```{r}
+    # Load data
+    cholangitis <- read.csv("cholangitis.csv")
+
+    #| messages: FALSE
+    #| warnings: FALSE
+
+    # Convert ordinal categorical variables to factors
+    cholangitis <- cholangitis %>%
+        mutate(status = as.factor(status),
+        drug = as.factor(drug),
+        ascites = as.factor(ascites),
+        hepatomegaly = as.factor(hepatomegaly),
+        spiders = as.factor(spiders),
+        edema = as.factor(edema),
+        stage = as.factor(stage)) %>%
+        select(-id) # this is irrelevant for our analysis
+```
+
+# Background Information
+
+# EDA
+
+Cleaning and preparing data for analysis.
+```{r, results = "hide"}
+    # check for missing data
+    cholangitis %>%
+        is.na() %>%
+        sum()
+
+    # remove missing data
+    cholangitis <- cholangitis %>%
+        na.omit()
+
+    # table of numeric variables
+    cholangitis_numeric <- cholangitis %>%
+        select_if(is.numeric)
+```
+
+### Univariate Analysis
+```{r}
+    # check for outliers in response variable
+    cholangitis %>%
+        ggplot(aes(x = n_days)) +
+            geom_boxplot()
+```
+
+I found no obvious outliers in the response variable.
+```{r}
+    # check for outliers in numeric variables
+    cholangitis_numeric %>%
+        gather(key = "variable", value = "value") %>%
+        ggplot(aes(x = value, y = variable)) +
+            geom_boxplot() +
+            facet_wrap(~variable, scales = "free") +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Once a model is constructed, I may remove outliers in the form of high-leverage points if indicated by diagnostics. For now, I will only remove the most extreme outliers of those shown in the boxplots.
+
+```{r}
+    # remove outliers for multivariate eda
+    cholangitis_filtered <- cholangitis %>%
+        filter(age < 28650,
+                albumin < 4.5,
+                albumin > 2,
+                alk_phos < 13500,
+                bilirubin < 25,
+                cholesterol < 1500,
+                copper < 500,
+                platelets < 500,
+                prothrombin < 14,
+                sgot < 320,
+                tryglicerides < 380)
+
+    # fix numeric table with filters
+    cholangitis_filtered_numeric <- cholangitis_filtered %>%
+        select_if(is.numeric)
+```
+
+```{r}
+    # response variable and drug type
+    cholangitis_filtered %>%
+        ggplot(aes(x = drug, y = n_days, color = drug)) +
+        geom_beeswarm() +
+        scale_color_manual(values = c("paleturquoise4", "rosybrown4")) +
+        scale_y_continuous(trans = "log")
+```
+
+To better visualize the differences in distributions of n_days between the drug and placebo groups I used the log-transformation in the graph. The most notable difference between the distributions is that the placebo group has more observations with a lower log(n_days).
+
+```{r}
+    # response variable, status and drug type
+    cholangitis_filtered %>%
+        ggplot(aes(x = interaction(status, drug), y = n_days, fill = drug)) +
+        geom_violin() +
+        labs(title = "Number of Days Exhibits Different Distribution Among Status Levels for Both Drug Types",
+            x = "Status by Drug Type",
+            y = "Log - Number of Days") +
+        scale_fill_manual(values = c("papayawhip", "slategray2")) +
+        scale_y_continuous(trans = "log")
+```
+
+The end date for n_days occurs as soon as the patient dies, receives a liver transplant, or the study ends. This, therefore, implies a relationship with the categorical variable status, which gives the patient's status at the end date of n_days. To examine this distribution, along with the drug type variable, I graphed the violin distributions of the interactions between status and drug and n_days. Once again to better see the differences, I log-transformed n_days. Each level of the interaction variable shows a different distribution of log(n_days), which indicates that it might be valuable to include both variables when modeling n_days.
+
+```{r}
+    as.data.frame(cor(cholangitis_filtered_numeric)) %>%
+        rownames_to_column("Variables_1") %>%
+        pivot_longer(-c(Variables_1), names_to = "Variables_2", values_to = "Correlation") %>%
+        arrange(Correlation) %>%
+        mutate(
+            Variables_1 = factor(Variables_1, levels = unique(Variables_1)),
+            Variables_2 = factor(Variables_2, levels = unique(Variables_2))
+        ) %>%
+        ggplot(mapping = aes(x = Variables_1, y = Variables_2)) +
+        geom_tile(aes(fill = Correlation)) +
+        scale_fill_gradient(low = "lightcyan", high = "blue2") +
+        scale_x_discrete(guide = guide_axis(n.dodge = 2))
+```
+
+From the correlation heatmap
